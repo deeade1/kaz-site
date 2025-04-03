@@ -1,0 +1,225 @@
+# schema.py
+import graphene
+from graphene import relay
+from graphene_django import DjangoObjectType
+from graphene_django.filter import DjangoFilterConnectionField
+from graphql import GraphQLError
+from .models import (
+    Attribute,
+    AttributeValue,
+    AssignedPageAttributeValue,
+    AttributePage,
+    AssignedProductAttributeValue,
+    AttributeProduct,
+    AssignedVariantAttributeValue,
+    AttributeVariant,
+    AssignedVariantAttribute
+)
+
+# --- Node Types ---
+class AttributeNode(DjangoObjectType):
+    class Meta:
+        model = Attribute
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'slug': ['exact', 'icontains'],
+            'name': ['exact', 'icontains'],
+            'type': ['exact'],
+            'input_type': ['exact'],
+            'visible_in_storefront': ['exact'],
+        }
+
+class AttributeValueNode(DjangoObjectType):
+    class Meta:
+        model = AttributeValue
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'name': ['exact', 'icontains'],
+            'slug': ['exact'],
+            'attribute__id': ['exact'],
+        }
+
+class AssignedPageAttributeValueNode(DjangoObjectType):
+    class Meta:
+        model = AssignedPageAttributeValue
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'page__id': ['exact'],
+            'value__id': ['exact'],
+        }
+
+class AttributePageNode(DjangoObjectType):
+    class Meta:
+        model = AttributePage
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'page_type__id': ['exact'],
+            'attribute__id': ['exact'],
+        }
+
+class AssignedProductAttributeValueNode(DjangoObjectType):
+    class Meta:
+        model = AssignedProductAttributeValue
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'product__id': ['exact'],
+            'value__id': ['exact'],
+        }
+
+class AttributeProductNode(DjangoObjectType):
+    class Meta:
+        model = AttributeProduct
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'product_type__id': ['exact'],
+            'attribute__id': ['exact'],
+        }
+
+class AssignedVariantAttributeValueNode(DjangoObjectType):
+    class Meta:
+        model = AssignedVariantAttributeValue
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'assignment__id': ['exact'],
+            'value__id': ['exact'],
+        }
+
+class AttributeVariantNode(DjangoObjectType):
+    class Meta:
+        model = AttributeVariant
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'product_type__id': ['exact'],
+            'attribute__id': ['exact'],
+        }
+
+class AssignedVariantAttributeNode(DjangoObjectType):
+    class Meta:
+        model = AssignedVariantAttribute
+        interfaces = (relay.Node,)
+        filter_fields = {
+            'variant__id': ['exact'],
+            'assignment__id': ['exact'],
+        }
+
+# --- Input Types ---
+class AttributeInput(graphene.InputObjectType):
+    slug = graphene.String(required=True)
+    name = graphene.String(required=True)
+    type = graphene.String(required=True)
+    input_type = graphene.String()
+    entity_type = graphene.String()
+    unit = graphene.String()
+    value_required = graphene.Boolean()
+    visible_in_storefront = graphene.Boolean()
+
+class AttributeValueInput(graphene.InputObjectType):
+    name = graphene.String(required=True)
+    value = graphene.String()
+    slug = graphene.String(required=True)
+    attribute_id = graphene.ID(required=True)
+    rich_text = graphene.JSONString()
+    plain_text = graphene.String()
+
+# --- Mutations ---
+class CreateAttribute(relay.ClientIDMutation):
+    class Input:
+        attribute_data = AttributeInput(required=True)
+
+    attribute = graphene.Field(AttributeNode)
+    
+    @classmethod
+    def mutate_and_get_payload(cls, root, info, attribute_data):
+        user = info.context.user
+        if not user.has_perm('attribute.add_attribute'):
+            raise GraphQLError('Permission denied')
+        
+        attribute = Attribute.objects.create(**attribute_data)
+        return CreateAttribute(attribute=attribute)
+
+class UpdateAttribute(relay.ClientIDMutation):
+    class Input:
+        id = graphene.ID(required=True)
+        attribute_data = AttributeInput(required=True)
+
+    attribute = graphene.Field(AttributeNode)
+    
+    @classmethod
+    def mutate_and_get_payload(cls, root, info, id, attribute_data):
+        user = info.context.user
+        if not user.has_perm('attribute.change_attribute'):
+            raise GraphQLError('Permission denied')
+        
+        _, pk = relay.Node.from_global_id(id)
+        attribute = Attribute.objects.get(pk=pk)
+        
+        for field, value in attribute_data.items():
+            setattr(attribute, field, value)
+        attribute.save()
+        
+        return UpdateAttribute(attribute=attribute)
+
+class DeleteAttribute(relay.ClientIDMutation):
+    class Input:
+        id = graphene.ID(required=True)
+
+    success = graphene.Boolean()
+    
+    @classmethod
+    def mutate_and_get_payload(cls, root, info, id):
+        user = info.context.user
+        if not user.has_perm('attribute.delete_attribute'):
+            raise GraphQLError('Permission denied')
+        
+        _, pk = relay.Node.from_global_id(id)
+        attribute = Attribute.objects.get(pk=pk)
+        attribute.delete()
+        
+        return DeleteAttribute(success=True)
+
+# Similar mutations for other models following the same pattern...
+
+class AssignAttributeToProductType(relay.ClientIDMutation):
+    class Input:
+        attribute_id = graphene.ID(required=True)
+        product_type_id = graphene.ID(required=True)
+
+    attribute_product = graphene.Field(AttributeProductNode)
+    
+    @classmethod
+    def mutate_and_get_payload(cls, root, info, attribute_id, product_type_id):
+        user = info.context.user
+        if not user.has_perm('attribute.add_attributeproduct'):
+            raise GraphQLError('Permission denied')
+        
+        _, attr_pk = relay.Node.from_global_id(attribute_id)
+        _, pt_pk = relay.Node.from_global_id(product_type_id)
+        
+        attribute_product = AttributeProduct.objects.create(
+            attribute_id=attr_pk,
+            product_type_id=pt_pk
+        )
+        
+        return AssignAttributeToProductType(attribute_product=attribute_product)
+
+# ... Add similar mutations for all assignment operations
+
+# --- Query ---
+class Query(graphene.ObjectType):
+    attribute = relay.Node.Field(AttributeNode)
+    all_attributes = DjangoFilterConnectionField(AttributeNode)
+    
+    attribute_value = relay.Node.Field(AttributeValueNode)
+    all_attribute_values = DjangoFilterConnectionField(AttributeValueNode)
+    
+    # Add similar fields for all other models
+
+# --- Mutation ---
+class Mutation(graphene.ObjectType):
+    create_attribute = CreateAttribute.Field()
+    update_attribute = UpdateAttribute.Field()
+    delete_attribute = DeleteAttribute.Field()
+    assign_attribute_to_product_type = AssignAttributeToProductType.Field()
+    # Add all other mutation fields
+
+schema = graphene.Schema(query=Query, mutation=Mutation)

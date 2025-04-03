@@ -1,0 +1,12 @@
+schema: http://localhost:8001/graphql  # Django GraphQL backend endpoint
+documents: './src/**/*.js'            # Path to your .jsx files
+generates:
+  ./src/graphql/generated.js:
+    plugins:
+      - typescript-operations          # Generates operation-related helpers
+      - typed-document-node            # Optional, but helps Apollo hooks
+      - typescript-react-apollo        # Generates Apollo hooks (even works in JS)
+    config:
+      withHooks: true
+      withHOC: false
+      withComponent: false

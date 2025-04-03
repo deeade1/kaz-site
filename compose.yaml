@@ -1,0 +1,67 @@
+services:
+  kaz-db:
+    container_name: kaz-db
+    image: postgis/postgis:17-3.5
+    ports:
+      - "5433:5432"
+    env_file:
+      - ./.env.prod.db
+    volumes:
+      - kaz-db-data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kaz-backend:
+    container_name: kaz-backend
+    build:
+      context: .  # The root of the project directory
+      dockerfile: apps/docker/backend/Dockerfile
+    depends_on:
+      kaz-db:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    env_file:
+      - ./.env
+    volumes:
+      - ./media:/home/apps/backend/media
+      - ./static:/home/apps/backend/static
+      - ./apps/backend:/home/apps/backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  kaz-nginx:
+    container_name: kaz-nginx
+    build:
+      context: .  # The root of the project directory
+      dockerfile: apps/docker/frontend/Dockerfile
+    ports:
+      - "8081:80"  # External port 8081 to container's 80
+    volumes:
+      - ./media:/home/apps/backend/media
+      - ./static:/home/apps/backend/static
+      - ./apps/docker/nginx/:/etc/nginx/conf.d
+      - ./apps/frontend/dist:/usr/share/nginx/html
+    restart: unless-stopped
+    depends_on:
+      kaz-backend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  kaz-db-data:
+  media:
+  static:
+  backend:

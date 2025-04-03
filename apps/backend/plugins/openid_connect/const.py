@@ -1,0 +1,1 @@
+KAZ_STAFF_PERMISSION = "kaz:staff"
