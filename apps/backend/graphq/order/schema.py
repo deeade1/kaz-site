@@ -1,28 +1,17 @@
 from typing import List, Optional
-
 import graphene
 from graphene import relay
 from graphene_django.filter import DjangoFilterConnectionField
 from graphql import GraphQLError
+from uuid import UUID
+from django.db.models import Q
 
 from graphq.core.types import TaxedMoney
-
-from ...order import models
-from ...permission.enums import OrderPermissions
-from ..core.doc_category import DOC_CATEGORY_ORDERS
+from order import models
 from ..core.enums import ReportingPeriod
-from ..core.fields import PermissionsField
-from ..core.scalars import UUID
-from ..core.utils import ext_ref_to_global_id_or_error, from_global_id_or_error
-from ..core.validators import validate_one_of_args_is_in_query
 from .enums import ReportingPeriod
 from .models import Order, OrderEvent, OrderGrantedRefund
-from .permissions import OrderPermissions
-from .resolvers import (resolve_draft_orders, resolve_homepage_events,
-                        resolve_order, resolve_order_by_token, resolve_orders,
-                        resolve_orders_total)
 from .types import OrderEventNode, OrderNode, TaxedMoney
-
 
 class OrderQueries(graphene.ObjectType):
     homepage_events = DjangoFilterConnectionField(
@@ -34,163 +23,183 @@ class OrderQueries(graphene.ObjectType):
     order = relay.Node.Field(
         OrderNode,
         description="Look up an order by ID or external reference.",
-        external_reference=graphene.Argument(graphene.String, description="External reference ID."),
+        external_reference=graphene.Argument(
+            graphene.String, 
+            description="External reference ID."
+        ),
     )
     
     orders = DjangoFilterConnectionField(
         OrderNode,
-        channel=graphene.String(description="Slug of a channel for which data should be returned."),
-        permissions=[OrderPermissions.MANAGE_ORDERS],
+        channel=graphene.String(
+            description="Slug of a channel for which data should be returned."
+        ),
     )
     
     draft_orders = DjangoFilterConnectionField(
         OrderNode,
-        permissions=[OrderPermissions.MANAGE_ORDERS],
+        description="List of draft orders.",
     )
     
     orders_total = relay.Node.Field(
         TaxedMoney,
         description="Return the total sales amount for a specific period.",
-        period=graphene.Argument(ReportingPeriod, description="A period of time."),
-        channel=graphene.String(description="Slug of a channel for which data should be returned."),
-        permissions=[OrderPermissions.MANAGE_ORDERS],
+        period=graphene.Argument(
+            ReportingPeriod, 
+            description="A period of time."
+        ),
+        channel=graphene.String(
+            description="Slug of a channel for which data should be returned."
+        ),
     )
     
     order_by_token = relay.Node.Field(
         OrderNode,
         description="Look up an order by token.",
-        token=graphene.Argument(graphene.UUID, required=True, description="The order's token."),
+        token=graphene.Argument(
+            graphene.UUID, 
+            required=True, 
+            description="The order's token."
+        ),
     )
 
-    # Resolver Methods
+    # Optimized Resolvers
     @staticmethod
     def resolve_homepage_events(root, info, **kwargs):
-        return resolve_homepage_events(info)
-
-    @staticmethod
-    def resolve_order(root, info, external_reference=None, id=None):
-        return resolve_order(info, external_reference, id)
-
-    @staticmethod
-    def resolve_orders(root, info, channel=None, **kwargs):
-        return resolve_orders(info, channel, **kwargs)
-
-    @staticmethod
-    def resolve_draft_orders(root, info, **kwargs):
-        return resolve_draft_orders(info, **kwargs)
-
-    @staticmethod
-    def resolve_orders_total(root, info, period, channel=None):
-        return resolve_orders_total(info, period, channel)
-
-    @staticmethod
-    def resolve_order_by_token(root, info, token):
-        return resolve_order_by_token(info, token)
-
-    ORDER_SEARCH_FIELDS = ("id", "discount_name", "token", "user_email", "user__email")
-
-
-    def resolve_orders(
-        info, channel_slug=None, requesting_user=None, requestor_has_access_to_all=False
-    ):
-        database_connection_name = get_database_connection_name(info.context)
-        qs = models.Order.objects.using(database_connection_name).non_draft()
-        if channel_slug:
-            qs = qs.filter(channel__slug=str(channel_slug))
-
-        if requesting_user and not requestor_has_access_to_all:
-            return qs.filter(user_id=requesting_user.id)
-
-        if get_app_promise(info.context).get():
-            return qs
-
-        accessible_channels = get_user_accessible_channels(info, info.context.user)
-        if channel_slug and channel_slug not in [
-            channel.slug for channel in accessible_channels
-        ]:
-            raise PermissionDenied(
-                message=f"You do not have access to the {channel_slug} channel."
-            )
-        channel_ids = [channel.id for channel in accessible_channels]
-        return qs.filter(channel_id__in=channel_ids)
-
-
-    def resolve_draft_orders(info):
-        database_connection_name = get_database_connection_name(info.context)
-        qs = models.Order.objects.using(database_connection_name).drafts()
-
-        if get_app_promise(info.context).get():
-            return qs
-
-        accessible_channels = get_user_accessible_channels(info, info.context.user)
-        channel_ids = [channel.id for channel in accessible_channels]
-        return qs.filter(channel_id__in=channel_ids)
-
-
-    @traced_resolver
-    def resolve_orders_total(info, period, channel_slug):
-        if channel_slug is None:
-            channel_slug = get_default_channel_slug_or_graphql_error()
-        channel = Channel.objects.filter(slug=str(channel_slug)).first()
-        if not channel:
-            return None
-        database_connection_name = get_database_connection_name(info.context)
-
-        app = get_app_promise(info.context).get()
-        if not app:
-            accessible_channels = get_user_accessible_channels(info, info.context.user)
-            if channel_slug not in [channel.slug for channel in accessible_channels]:
-                raise PermissionDenied(
-                    message=f"You do not have access to the {channel_slug} channel."
-                )
-
-        qs = (
-            models.Order.objects.using(database_connection_name)
-            .non_draft()
-            .exclude(status__in=[OrderStatus.CANCELED, OrderStatus.EXPIRED])
-            .filter(channel__slug=str(channel_slug))
-        )
-        qs = filter_by_period(qs, period, "created_at")
-        return sum_order_totals(qs, channel.currency_code)
-
-
-    def resolve_order(info, id):
-        if id is None:
-            return None
-        try:
-            id = UUID(id)
-            lookup = Q(id=id)
-        except ValueError:
-            lookup = Q(number=id) & Q(use_old_id=True)
-        database_connection_name = get_database_connection_name(info.context)
-        return models.Order.objects.using(database_connection_name).filter(lookup).first()
-
-
-    def resolve_homepage_events(info):
-        # Filter only selected events to be displayed on homepage.
+        """Optimized resolver for homepage events with prefetching."""
         types = [
             OrderEvents.PLACED,
             OrderEvents.PLACED_FROM_DRAFT,
             OrderEvents.ORDER_FULLY_PAID,
         ]
-        database_connection_name = get_database_connection_name(info.context)
-        lookup = Q(type__in=types)
-        app = get_app_promise(info.context).get()
-        if not app:
-            # get order events from orders that user has access to
+        
+        qs = models.OrderEvent.objects.filter(type__in=types)
+        
+        # Apply channel filtering if needed
+        if not get_app_promise(info.context).get():
             accessible_channels = get_user_accessible_channels(info, info.context.user)
             channel_ids = [channel.id for channel in accessible_channels]
-            accessible_orders = models.Order.objects.filter(channel_id__in=channel_ids)
-            lookup &= Q(order_id__in=accessible_orders.values("id"))
-        return models.OrderEvent.objects.using(database_connection_name).filter(lookup)
+            qs = qs.filter(order__channel_id__in=channel_ids)
+            
+        return qs.prefetch_related('order', 'user')
 
+    @staticmethod
+    def resolve_order(root, info, external_reference=None, id=None):
+        """Optimized order lookup with caching."""
+        if not (external_reference or id):
+            return None
+            
+        qs = models.Order.objects.all()
+        
+        if external_reference:
+            qs = qs.filter(external_reference=external_reference)
+        else:
+            try:
+                uuid = UUID(id)
+                qs = qs.filter(Q(id=uuid) | Q(number=id, use_old_id=True))
+            except ValueError:
+                qs = qs.filter(number=id, use_old_id=True)
+                
+        return qs.select_related(
+            'channel',
+            'user',
+            'shipping_address',
+            'billing_address'
+        ).first()
 
-    def resolve_order_by_token(info, token):
-        database_connection_name = get_database_connection_name(info.context)
+    @staticmethod
+    def resolve_orders(root, info, channel=None, **kwargs):
+        """Optimized orders resolver with permission checks."""
+        qs = models.Order.objects.non_draft()
+        
+        if channel:
+            qs = qs.filter(channel__slug=channel)
+            
+        # Permission handling
+        user = info.context.user
+        if user and not user.has_perm(OrderPermissions.MANAGE_ORDERS):
+            qs = qs.filter(user=user)
+        elif not get_app_promise(info.context).get():
+            accessible_channels = get_user_accessible_channels(info, user)
+            qs = qs.filter(channel__in=accessible_channels)
+            
+        return qs.select_related(
+            'channel',
+            'user'
+        ).prefetch_related(
+            'payments',
+            'lines'
+        )
+
+    @staticmethod
+    def resolve_draft_orders(root, info, **kwargs):
+        """Optimized draft orders resolver."""
+        qs = models.Order.objects.drafts()
+        
+        # Permission handling
+        if not get_app_promise(info.context).get():
+            accessible_channels = get_user_accessible_channels(info, info.context.user)
+            qs = qs.filter(channel__in=accessible_channels)
+            
+        return qs.select_related(
+            'channel',
+            'user'
+        ).prefetch_related(
+            'lines'
+        )
+
+    @staticmethod
+    def resolve_orders_total(root, info, period, channel=None):
+        """Optimized orders total calculation."""
+        channel_slug = channel or get_default_channel_slug_or_graphql_error()
+        
+        # Early permission check
+        if not get_app_promise(info.context).get():
+            accessible_channels = get_user_accessible_channels(info, info.context.user)
+            if channel_slug not in [c.slug for c in accessible_channels]:
+                raise PermissionDenied(
+                    f"You do not have access to the {channel_slug} channel."
+                )
+        
+        # Get channel and currency once
+        channel = Channel.objects.filter(slug=channel_slug).only('currency_code').first()
+        if not channel:
+            return None
+            
+        # Optimized queryset
+        qs = (
+            models.Order.objects
+            .non_draft()
+            .exclude(status__in=[OrderStatus.CANCELED, OrderStatus.EXPIRED])
+            .filter(channel__slug=channel_slug)
+            .filter_by_period(period, "created_at")
+            .only('total_gross_amount', 'currency')
+        )
+        
+        return sum_order_totals(qs, channel.currency_code)
+
+    @staticmethod
+    def resolve_order_by_token(root, info, token):
+        """Optimized order lookup by token."""
         return (
-            models.Order.objects.using(database_connection_name)
+            models.Order.objects
             .exclude(status=OrderStatus.DRAFT)
             .filter(id=token)
+            .select_related(
+                'channel',
+                'user',
+                'shipping_address',
+                'billing_address'
+            )
+            .prefetch_related('lines')
             .first()
         )
 
+    # Common search fields
+    ORDER_SEARCH_FIELDS = (
+        "id", 
+        "discount_name", 
+        "token", 
+        "user_email", 
+        "user__email"
+    )

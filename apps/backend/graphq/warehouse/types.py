@@ -11,6 +11,23 @@ from warehouse import models
 from warehouse.reservations import is_reservation_enabled
 from ..channel import ChannelContext
 from .models import Warehouse as WarehouseModel
+from ..core.dataloaders import DataLoader
+
+
+class WarehouseByIdLoader(DataLoader):
+    context_key = "warehouse_id"
+
+    def batch_load(self, keys):
+        warehouses = WarehouseModel.objects.in_bulk(keys)
+        return [warehouses.get(warehouse_id) for warehouse_id in keys]
+
+
+class ProductVariantByIdLoader(DataLoader):
+    context_key = "product_variant_id"
+
+    def batch_load(self, keys):
+        variants = models.ProductVariant.objects.in_bulk(keys)
+        return [variants.get(variant_id) for variant_id in keys]
 
 
 class WarehouseNode(OptimizedDjangoObjectType):
@@ -27,26 +44,34 @@ class WarehouseNode(OptimizedDjangoObjectType):
         fields = "__all__"
         filter_fields = {
             "name": ["exact", "icontains", "istartswith"],
+            "slug": ["exact"],
+            "click_and_collect_option": ["exact"],
+            "is_private": ["exact"],
         }
         interfaces = (Node,)
 
     @staticmethod
     def resolve_countries(root, info):
-        shipping_zones = query(root.shipping_zones.all(), info)
-        return list(set(chain.from_iterable(zone.countries for zone in shipping_zones)))
+        # Use prefetch_related in queries to optimize this
+        return list(set(chain.from_iterable(
+            zone.countries for zone in root.shipping_zones.all()
+        )))
 
     @staticmethod
-    def resolve_shipping_zones(root, info, **kwargs):
-        return query(root.shipping_zones.all(), info)
+    def resolve_shipping_zones(root, info):
+        return query(root.shipping_zones.all().only("name", "description"), info)
 
     @staticmethod
     def resolve_address(root, info):
-        return root.address
+        return query(root.address, info)
 
 
 class StockNode(OptimizedDjangoObjectType):
     quantity_reserved = graphene.Int(
         description="Total quantity reserved for the stock item."
+    )
+    available_quantity = graphene.Int(
+        description="Calculated available quantity (quantity - allocated - reserved)"
     )
 
     class Meta:
@@ -55,6 +80,7 @@ class StockNode(OptimizedDjangoObjectType):
         filter_fields = {
             "warehouse__name": ["exact", "icontains", "istartswith"],
             "product_variant__name": ["exact", "icontains", "istartswith"],
+            "quantity": ["gte", "lte"],
         }
         interfaces = (Node,)
 
@@ -64,49 +90,63 @@ class StockNode(OptimizedDjangoObjectType):
 
     @staticmethod
     def resolve_quantity_allocated(root, info):
-        # Calculate allocated quantity from related allocations
-        return query(
-            root.allocations.aggregate(
-                quantity_allocated=Coalesce(Sum("quantity_allocated"), 0)
-            ),
-            info,
-        )["quantity_allocated"]
+        # Use cached value if available
+        if hasattr(root, 'quantity_allocated'):
+            return root.quantity_allocated
+        return root.allocations.aggregate(
+            quantity_allocated=Coalesce(Sum("quantity_allocated"), 0
+        ))["quantity_allocated"]
 
     @staticmethod
     def resolve_quantity_reserved(root, info):
-        site = info.context.site
-        if not is_reservation_enabled(site.settings):
+        if not is_reservation_enabled(info.context.site.settings):
             return 0
 
-        # Calculate reserved quantity, filtering by active reservations
-        return query(
-            root.reservations.aggregate(
-                quantity_reserved=Coalesce(
-                    Sum(
-                        "quantity_reserved",
-                        filter=Q(reserved_until__gt=timezone.now()),
-                    ),
-                    0,
-                )
-            ),
-            info,
+        # Use cached value if available
+        if hasattr(root, 'quantity_reserved'):
+            return root.quantity_reserved
+
+        return root.reservations.filter(
+            reserved_until__gt=timezone.now()
+        ).aggregate(
+            quantity_reserved=Coalesce(Sum("quantity_reserved"), 0)
         )["quantity_reserved"]
 
     @staticmethod
+    def resolve_available_quantity(root, info):
+        # Calculate on the fly if not pre-annotated
+        if hasattr(root, 'available_quantity'):
+            return root.available_quantity
+            
+        allocated = root.allocations.aggregate(
+            total=Coalesce(Sum("quantity_allocated"), 0)
+        )["total"]
+        
+        if is_reservation_enabled(info.context.site.settings):
+            reserved = root.reservations.filter(
+                reserved_until__gt=timezone.now()
+            ).aggregate(
+                total=Coalesce(Sum("quantity_reserved"), 0)
+            )["total"]
+        else:
+            reserved = 0
+            
+        return max(root.quantity - allocated - reserved, 0)
+
+    @staticmethod
     def resolve_warehouse(root, info):
-        # Load warehouse data by ID using WarehouseByIdLoader
-        if root.warehouse_id:
-            return query(WarehouseByIdLoader(info.context).load(root.warehouse_id), info)
-        return None
+        if not root.warehouse_id:
+            return None
+        return WarehouseByIdLoader(info.context).load(root.warehouse_id)
 
     @staticmethod
     def resolve_product_variant(root, info):
-        # Load product variant data by ID with a context for channels
-        return query(
-            ProductVariantByIdLoader(info.context)
-            .load(root.product_variant_id)
-            .then(lambda variant: ChannelContext(node=variant, channel_slug=None)),
-            info,
+        if not root.product_variant_id:
+            return None
+        return ProductVariantByIdLoader(info.context).load(
+            root.product_variant_id
+        ).then(
+            lambda variant: ChannelContext(node=variant, channel_slug=None)
         )
 
 
@@ -121,25 +161,21 @@ class AllocationNode(OptimizedDjangoObjectType):
         filter_fields = {
             "order_line__id": ["exact"],
             "stock__id": ["exact"],
+            "quantity_allocated": ["gte", "lte"],
         }
         interfaces = (Node,)
 
     @staticmethod
     def resolve_stock_available_quantity(root, info):
-        # Use available_quantity_for_stock to get the available quantity for the stock
-        return query(
-            models.Allocation.objects.available_quantity_for_stock(root.stock), info
-        )
+        return models.Allocation.objects.filter(
+            stock=root.stock
+        ).available_quantity_for_stock(root.stock)
 
 
 class ChannelWarehouseNode(OptimizedDjangoObjectType):
     class Meta:
-        model = models.Category
+        model = models.ChannelWarehouse
         fields = "__all__"
-        filter_fields = {
-            "name": ["exact", "icontains", "istartswith"],
-            "slug": ["exact", "icontains", "istartswith"],
-        }
         interfaces = (Node,)
 
 
@@ -150,6 +186,7 @@ class PreorderAllocationNode(OptimizedDjangoObjectType):
         filter_fields = {
             "order_line__id": ["exact"],
             "product_variant_channel_listing__id": ["exact"],
+            "quantity": ["gte", "lte"],
         }
         interfaces = (Node,)
 
@@ -161,6 +198,7 @@ class PreorderReservationNode(OptimizedDjangoObjectType):
         filter_fields = {
             "checkout_line__id": ["exact"],
             "product_variant_channel_listing__id": ["exact"],
+            "quantity_reserved": ["gte", "lte"],
             "reserved_until": ["gte", "lte"],
         }
         interfaces = (Node,)
@@ -173,6 +211,7 @@ class ReservationNode(OptimizedDjangoObjectType):
         filter_fields = {
             "checkout_line__id": ["exact"],
             "stock__id": ["exact"],
+            "quantity_reserved": ["gte", "lte"],
             "reserved_until": ["gte", "lte"],
         }
         interfaces = (Node,)

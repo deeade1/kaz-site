@@ -3,11 +3,10 @@ from django.db.models import QuerySet
 from graphene import relay
 from graphene_django import DjangoObjectType
 from graphene_django_optimizer import OptimizedDjangoObjectType, query
+from django_countries.fields import Country
 
-# Core utilities and types
+# Core imports
 from core.weight import convert_weight_to_default_weight_unit
-from ..core.fields import JSONString
-from ..core.tracing import traced_resolver
 from ..core.types import (
     CountryDisplay,
     Money,
@@ -15,9 +14,10 @@ from ..core.types import (
     NonNullList,
     Weight,
 )
+from ..core.fields import JSONString
+from ..core.tracing import traced_resolver
 
-# Product & Shipping models
-from product import models as product_models
+# Model imports
 from shipping import models as shipping_models
 from shipping.models import (
     ShippingMethod,
@@ -26,233 +26,258 @@ from shipping.models import (
     ShippingMethodTranslation,
     ShippingMethodChannelListing,
 )
-from shipping.interface import ShippingMethodData
 
 # Channel & Context
 from ..channel import ChannelQsContext
-from ..channel.types import (
-    Channel,
-    ChannelContext,
-    ChannelContextType,
-    ChannelContextTypeWithMetadata,
-    ChannelContextTypeWithMetadataForObjectType,
-)
+from ..channel.types import Channel
 
-# Enums & Permissions
-from ..account.enums import CountryCodeEnum
+# Enums
 from .enums import PostalCodeRuleInclusionTypeEnum, ShippingMethodTypeEnum
 
-# Tax, Warehouse, Translation
-from ..tax.types import TaxClass
-from ..warehouse.types import Warehouse
-from ..translations.fields import TranslationField
+# Translation
 from ..translations.types import ShippingMethodTranslation
-
-# Shipping resolvers
-from ..shipping.resolvers import resolve_price_range, resolve_shipping_translation
 
 
 class ShippingZoneNode(OptimizedDjangoObjectType):
     class Meta:
         model = ShippingZone
+        description = "Represents a shipping zone in the shop."
+        interfaces = (relay.Node,)
         fields = "__all__"
-        filter_fields = {
+        filterset_fields = {
             "name": ["exact", "icontains", "istartswith"],
             "default": ["exact"],
             "countries": ["exact", "icontains"],
         }
-        interfaces = (graphene.relay.Node,)
+        convert_choices_to_enum = False
 
     price_range = graphene.Field(
-        MoneyRange, 
-        description="Lowest and highest prices for the shipping."
+        MoneyRange,
+        description="Lowest and highest prices for the shipping.",
+        channel_slug=graphene.String(
+            description="Slug of the channel for which the data should be returned."
+        )
     )
-    countries = graphene.List(
-        CountryDisplay, 
-        required=True, 
-        description="List of countries in the shipping zone."
+    countries = NonNullList(
+        CountryDisplay,
+        description="List of countries available for the shipping method."
     )
-    warehouses = graphene.List(
-        lambda: Warehouse, 
-        required=True, 
+    warehouses = NonNullList(
+        "saleor.warehouse.types.Warehouse",
         description="List of warehouses for the shipping zone."
     )
-    channels = graphene.List(
-        lambda: Channel, 
-        required=True, 
+    channels = NonNullList(
+        Channel,
         description="List of channels for the shipping zone."
     )
-    description = graphene.String(description="Description of a shipping zone.")
 
     @staticmethod
-    def resolve_price_range(root, info):
-        # Assuming price_range is computed per channel, adjust as per your logic.
-        # You might need to pass channel_slug in context or arguments.
-        # Here’s an example without specific channel logic.
-        return root.get_shipping_methods_for_channel(
-            channel_slug=info.context.channel.slug  # Adjust accordingly
-        ).aggregate_price_range()
+    @traced_resolver
+    def resolve_price_range(root: ShippingZone, info, channel_slug=None):
+        """Optimized price range resolver with channel context."""
+        channel_slug = channel_slug or info.context.channel.slug
+        return root.get_shipping_methods_for_channel(channel_slug).aggregate_price_range()
 
     @staticmethod
-    def resolve_countries(root, info):
-        from django_countries.fields import Country
+    def resolve_countries(root: ShippingZone, _info):
+        """Efficient country resolution with cached country names."""
         return [
-            CountryDisplay(code=country_code, country=Country(country_code).name)
-            for country_code in root.countries
+            CountryDisplay(code=code, country=Country(code).name)
+            for code in root.countries
         ]
 
     @staticmethod
-    def resolve_warehouses(root, info):
-        # Assuming a M2M relationship or related field 'warehouses' exists
-        return root.warehouse_set.all()
+    def resolve_warehouses(root: ShippingZone, info):
+        """Optimized warehouse resolution with prefetching."""
+        return query(root.warehouses.all(), info)
 
     @staticmethod
-    def resolve_channels(root, info):
-        return root.channels.all()
+    def resolve_channels(root: ShippingZone, info):
+        """Optimized channel resolution with prefetching."""
+        return query(root.channels.all(), info)
 
 
 class ShippingMethodNode(OptimizedDjangoObjectType):
     class Meta:
         model = ShippingMethod
+        description = "Shipping method are the methods you'll use to get customer's orders to them."
+        interfaces = (relay.Node,)
         fields = "__all__"
-        filter_fields = {
+        filterset_fields = {
             "name": ["exact", "icontains", "istartswith"],
             "type": ["exact"],
             "shipping_zone__name": ["exact", "icontains", "istartswith"],
             "tax_class__id": ["exact"],
         }
-        interfaces = (graphene.relay.Node,)
+        convert_choices_to_enum = False
 
-    #translation = graphene.Field(ShippingMethodTranslation, resolver=resolve_shipping_translation)
-    price = graphene.Field(Money, required=True)
-    maximum_order_price = graphene.Field(Money)
-    minimum_order_price = graphene.Field(Money)
-    active = graphene.Boolean(required=True)
-    message = graphene.String()
-    country_code = graphene.Field(graphene.String, required=True)
+    price = graphene.Field(
+        Money,
+        required=True,
+        description="Price of the shipping method.",
+        channel_slug=graphene.String(
+            description="Slug of the channel for which the data should be returned."
+        )
+    )
+    maximum_order_price = graphene.Field(
+        Money,
+        description="Maximum order price for this shipping method.",
+        channel_slug=graphene.String(
+            description="Slug of the channel for which the data should be returned."
+        )
+    )
+    minimum_order_price = graphene.Field(
+        Money,
+        description="Minimum order price for this shipping method.",
+        channel_slug=graphene.String(
+            description="Slug of the channel for which the data should be returned."
+        )
+    )
+    active = graphene.Boolean(
+        required=True,
+        description="Whether the shipping method is active.",
+        channel_slug=graphene.String(
+            description="Slug of the channel for which the data should be returned."
+        )
+    )
+    translation = TranslationField(ShippingMethodTranslation)
+    maximum_order_weight = graphene.Field(
+        Weight,
+        description="Maximum order weight for this shipping method."
+    )
+    minimum_order_weight = graphene.Field(
+        Weight,
+        description="Minimum order weight for this shipping method."
+    )
+    postal_code_rules = NonNullList(
+        lambda: ShippingMethodPostalCodeRuleNode,
+        description="List of postal code rules for this shipping method."
+    )
+    channel_listings = NonNullList(
+        lambda: ShippingMethodChannelListingNode,
+        description="List of channels available for the shipping method."
+    )
 
-    
-    def resolve_maximum_order_weight(root, info):
+    @staticmethod
+    @traced_resolver
+    def resolve_price(root: ShippingMethod, info, channel_slug=None):
+        """Optimized price resolver with channel context."""
+        channel_slug = channel_slug or info.context.channel.slug
+        listing = root.channel_listings.filter(channel__slug=channel_slug).first()
+        return listing.price if listing else None
+
+    @staticmethod
+    def resolve_maximum_order_price(root: ShippingMethod, info, channel_slug=None):
+        channel_slug = channel_slug or info.context.channel.slug
+        listing = root.channel_listings.filter(channel__slug=channel_slug).first()
+        return listing.maximum_order_price if listing else None
+
+    @staticmethod
+    def resolve_minimum_order_price(root: ShippingMethod, info, channel_slug=None):
+        channel_slug = channel_slug or info.context.channel.slug
+        listing = root.channel_listings.filter(channel__slug=channel_slug).first()
+        return listing.minimum_order_price if listing else None
+
+    @staticmethod
+    def resolve_active(root: ShippingMethod, info, channel_slug=None):
+        channel_slug = channel_slug or info.context.channel.slug
+        listing = root.channel_listings.filter(channel__slug=channel_slug).first()
+        return listing.is_active if listing else False
+
+    @staticmethod
+    def resolve_maximum_order_weight(root: ShippingMethod, _info):
         return convert_weight_to_default_weight_unit(root.maximum_order_weight)
 
     @staticmethod
-    def resolve_minimum_order_weight(root, info):
+    def resolve_minimum_order_weight(root: ShippingMethod, _info):
         return convert_weight_to_default_weight_unit(root.minimum_order_weight)
+
+    @staticmethod
+    def resolve_postal_code_rules(root: ShippingMethod, info):
+        return query(root.postal_code_rules.all(), info)
+
+    @staticmethod
+    def resolve_channel_listings(root: ShippingMethod, info):
+        return query(root.channel_listings.all(), info)
 
 
 class ShippingMethodPostalCodeRuleNode(OptimizedDjangoObjectType):
     class Meta:
         model = ShippingMethodPostalCodeRule
+        description = "Represents postal code rules for shipping methods."
+        interfaces = (relay.Node,)
         fields = "__all__"
-        filter_fields = {
+        filterset_fields = {
             "start": ["exact", "icontains", "istartswith"],
             "end": ["exact", "icontains", "istartswith"],
             "inclusion_type": ["exact"],
             "shipping_method__name": ["exact", "icontains", "istartswith"],
         }
-        interfaces = (graphene.relay.Node,)
 
-    # Explicit fields definitions (optional but good for clarity and customization)
-    start = graphene.String(description="Start of the postal code range.")
-    end = graphene.String(description="End of the postal code range.")
-    inclusion_type = graphene.Field(
-        PostalCodeRuleInclusionTypeEnum,
-        description="Specifies if the rule includes or excludes the postal code range.",
+    inclusion_type = PostalCodeRuleInclusionTypeEnum(
+        description="Inclusion type of the postal code rule.",
         required=True
     )
 
-    @staticmethod
-    def resolve_start(root, info):
-        return root.start
-
-    @staticmethod
-    def resolve_end(root, info):
-        return root.end
-
-    @staticmethod
-    def resolve_inclusion_type(root, info):
-        return root.inclusion_type
 
 class ShippingMethodChannelListingNode(OptimizedDjangoObjectType):
     class Meta:
         model = ShippingMethodChannelListing
+        description = "Represents shipping method channel listing."
+        interfaces = (relay.Node,)
         fields = "__all__"
-        filter_fields = {
+        filterset_fields = {
             "shipping_method__name": ["exact", "icontains", "istartswith"],
             "channel__slug": ["exact", "icontains", "istartswith"],
             "currency": ["exact"],
+            "is_active": ["exact"],
         }
-        interfaces = (graphene.relay.Node,)
 
-    # Explicit fields
-    channel = graphene.Field(Channel, required=True, description="Channel for the listing.")
-    maximum_order_price = graphene.Field(
+    price = graphene.Field(
         Money,
-        description="Maximum order price for which this shipping method is available."
+        description="Price of the shipping method in the given channel.",
+        required=True
     )
     minimum_order_price = graphene.Field(
         Money,
-        description="Minimum order price for which this shipping method is available."
+        description="Minimum order price to use this shipping method."
     )
-    price = graphene.Field(
+    maximum_order_price = graphene.Field(
         Money,
-        description="Shipping price for the channel."
+        description="Maximum order price to use this shipping method."
     )
 
     @staticmethod
-    def resolve_channel(root, info):
-        # You already have FK; can safely access
-        return root.channel
+    def resolve_price(root: ShippingMethodChannelListing, _info):
+        return root.price
 
     @staticmethod
-    def resolve_minimum_order_price(root, info):
+    def resolve_minimum_order_price(root: ShippingMethodChannelListing, _info):
         return root.minimum_order_price if root.minimum_order_price_amount else None
 
     @staticmethod
-    def resolve_maximum_order_price(root, info):
+    def resolve_maximum_order_price(root: ShippingMethodChannelListing, _info):
         return root.maximum_order_price if root.maximum_order_price_amount else None
 
-    @staticmethod
-    def resolve_price(root, info):
-        return root.price
- 
 
 class ShippingMethodTranslationNode(OptimizedDjangoObjectType):
     class Meta:
         model = ShippingMethodTranslation
+        description = "Represents shipping method translations."
+        interfaces = (relay.Node,)
         fields = "__all__"
-        filter_fields = {
+        filterset_fields = {
             "language_code": ["exact"],
             "shipping_method__name": ["exact", "icontains", "istartswith"],
         }
-        interfaces = (graphene.relay.Node,)
 
     name = graphene.String(description="Translated shipping method name.")
-    description = graphene.JSONString(description="Translated description in JSON format.")
-    language_code = graphene.String(description="Language code for the translation.")
-    shipping_method = graphene.Field(
-        lambda: ShippingMethodNode,
-        description="Shipping method related to this translation."
-    )
+    description = JSONString(description="Translated shipping method description.")
 
     @staticmethod
-    def resolve_name(root, info):
+    def resolve_name(root: ShippingMethodTranslation, _info):
         return root.name
 
     @staticmethod
-    def resolve_description(root, info):
+    def resolve_description(root: ShippingMethodTranslation, _info):
         return root.description
-
-    @staticmethod
-    def resolve_language_code(root, info):
-        return root.language_code
-
-    @staticmethod
-    def resolve_shipping_method(root, info):
-        return root.shipping_method
-    
-
-   
-   
-
-   

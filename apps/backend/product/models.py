@@ -14,9 +14,11 @@ from django.db.models import JSONField, TextField
 from django.urls import reverse
 from django.utils import timezone
 from django_measurement.models import MeasurementField
+from django_prices.models import MoneyField
 from measurement.measures import Weight
 from mptt.managers import TreeManager
 from mptt.models import MPTTModel
+from prices import Money
 
 from channel.models import Channel
 from core.models import (
@@ -31,8 +33,6 @@ from core.utils.editorjs import clean_editor_js
 from core.utils.translations import Translation, get_translation
 from core.weight import zero_weight
 from discount.models import PromotionRule
-from django_prices.models import MoneyField
-from prices import Money
 from seo.models import SeoModel, SeoModelTranslationWithSlug
 from tax.models import TaxClass
 
@@ -44,15 +44,15 @@ class Category(ModelWithMetadata, MPTTModel, SeoModel):
     slug = models.SlugField(max_length=255, unique=True, allow_unicode=True)
     description = models.JSONField(blank=True, null=True, default=clean_editor_js)
     description_plaintext = TextField(blank=True)
-    updated_at = models.DateTimeField(auto_now=True, blank=True, null=True)
-    search_vector = SearchVectorField(null=True, blank=True)
-    parent = models.ForeignKey(
-        "self", null=True, blank=True, related_name="children", on_delete=models.CASCADE
-    )
     background_image = models.ImageField(
         upload_to="category-backgrounds", blank=True, null=True
     )
     background_image_alt = models.CharField(max_length=128, blank=True)
+    parent = models.ForeignKey(
+        "self", null=True, blank=True, related_name="children", on_delete=models.CASCADE
+    )
+    search_vector = SearchVectorField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, blank=True, null=True)
 
     objects = models.Manager()
     tree = TreeManager()
@@ -61,16 +61,14 @@ class Category(ModelWithMetadata, MPTTModel, SeoModel):
         indexes = [
             *ModelWithMetadata.Meta.indexes,
             GinIndex(
-                name="category_search_name_slug_gin",
                 fields=["name", "slug", "description_plaintext"],
+                name="category_search_name_slug_gin",
                 opclasses=["gin_trgm_ops"] * 3,
             ),
-            GinIndex(
-                fields=["search_vector"],  # New GIN index
-                name="category_search_vector_gin"
-            ),
+            GinIndex(fields=["search_vector"], name="category_search_vector_gin"),
             BTreeIndex(fields=["updated_at"], name="updated_at_idx"),
         ]
+        ordering = ("name",)
 
     def __str__(self) -> str:
         return self.name
@@ -93,24 +91,17 @@ class CategoryTranslation(SeoModelTranslationWithSlug):
         unique_together = (("language_code", "category"),)
 
     def __str__(self) -> str:
-        return self.name if self.name else str(self.pk)
-
-    def __repr__(self) -> str:
-        class_ = type(self)
-        return f"{class_.__name__}(pk={self.pk!r}, name={self.name!r}, category_pk={self.category_id!r})"
+        return self.name or str(self.pk)
 
     def get_translated_object_id(self):
         return "Category", self.category_id
 
     def get_translated_keys(self):
-        translated_keys = super().get_translated_keys()
-        translated_keys.update(
-            {
-                "name": self.name,
-                "description": self.description,
-            }
-        )
-        return translated_keys
+        return {
+            **super().get_translated_keys(),
+            "name": self.name,
+            "description": self.description,
+        }
 
 
 class ProductType(ModelWithMetadata):
@@ -137,26 +128,19 @@ class ProductType(ModelWithMetadata):
         ordering = ("slug",)
         app_label = "product"
         permissions = (
-            (
-                "manage_product_types_and_attributes",
-                "Manage product types and attributes.",
-            ),
+            ("manage_product_types_and_attributes", "Manage product types and attributes."),
         )
         indexes = [
             *ModelWithMetadata.Meta.indexes,
             GinIndex(
-                name="product_type_search_gin",
                 fields=["name", "slug"],
+                name="product_type_search_gin",
                 opclasses=["gin_trgm_ops"] * 2,
             ),
         ]
 
     def __str__(self) -> str:
         return self.name
-
-    def __repr__(self) -> str:
-        class_ = type(self)
-        return f"<{class_.__module__}.{class_.__name__}(pk={self.pk!r}, name={self.name!r})>"
 
 
 class Product(SeoModel, ModelWithMetadata, ModelWithExternalReference):
@@ -167,10 +151,6 @@ class Product(SeoModel, ModelWithMetadata, ModelWithExternalReference):
     slug = models.SlugField(max_length=255, unique=True, allow_unicode=True)
     description = models.JSONField(blank=True, null=True, default=clean_editor_js)
     description_plaintext = TextField(blank=True)
-    search_document = models.TextField(blank=True, default="")
-    search_vector = SearchVectorField(blank=True, null=True)
-    search_index_dirty = models.BooleanField(default=False, db_index=True)
-
     category = models.ForeignKey(
         Category,
         related_name="products",
@@ -178,8 +158,6 @@ class Product(SeoModel, ModelWithMetadata, ModelWithExternalReference):
         null=True,
         blank=True,
     )
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at = models.DateTimeField(auto_now=True, db_index=True)
     weight = MeasurementField(
         measurement=Weight,
         unit_choices=WeightUnits.CHOICES,
@@ -201,6 +179,11 @@ class Product(SeoModel, ModelWithMetadata, ModelWithExternalReference):
         null=True,
         on_delete=models.SET_NULL,
     )
+    search_document = models.TextField(blank=True, default="")
+    search_vector = SearchVectorField(blank=True, null=True)
+    search_index_dirty = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
 
     objects = managers.ProductManager()
 
@@ -209,41 +192,18 @@ class Product(SeoModel, ModelWithMetadata, ModelWithExternalReference):
         ordering = ("slug",)
         permissions = (("manage_products", "Manage products."),)
         indexes = [
-            GinIndex(
-                name="product_search_gin",
-                fields=["search_document"],
-                opclasses=["gin_trgm_ops"],
-            ),
-            GinIndex(
-                name="product_tsearch",
-                fields=["search_vector"],
-            ),
-            GinIndex(
-                name="product_gin",
-                fields=["name", "slug"],
-                opclasses=["gin_trgm_ops"] * 2,
-            ),
-            models.Index(
-                fields=["category_id", "slug"],
-            ),
+            *ModelWithMetadata.Meta.indexes,
+            GinIndex(fields=["search_document"], name="product_search_gin", opclasses=["gin_trgm_ops"]),
+            GinIndex(fields=["search_vector"], name="product_tsearch"),
+            GinIndex(fields=["name", "slug"], name="product_gin", opclasses=["gin_trgm_ops"] * 2),
+            models.Index(fields=["category_id", "slug"]),
         ]
-        indexes.extend(ModelWithMetadata.Meta.indexes)
-
-    def __iter__(self):
-        if not hasattr(self, "__variants"):
-            setattr(self, "__variants", self.variants.all())
-        return iter(getattr(self, "__variants"))
-
-    def __repr__(self) -> str:
-        class_ = type(self)
-        return f"<{class_.__module__}.{class_.__name__}(pk={self.pk!r}, name={self.name!r})>"
 
     def __str__(self) -> str:
         return self.name
 
     def get_first_image(self):
-        all_media = self.media.all()
-        images = [media for media in all_media if media.type == ProductMediaTypes.IMAGE]
+        images = [m for m in self.media.all() if m.type == ProductMediaTypes.IMAGE]
         return images[0] if images else None
 
     @staticmethod
@@ -268,44 +228,38 @@ class ProductTranslation(SeoModelTranslationWithSlug):
         unique_together = (("language_code", "product"),)
 
     def __str__(self) -> str:
-        return self.name if self.name else str(self.pk)
-
-    def __repr__(self) -> str:
-        class_ = type(self)
-        return f"{class_.__name__}(pk={self.pk!r}, name={self.name!r}, product_pk={self.product_id!r})"
+        return self.name or str(self.pk)
 
     def get_translated_object_id(self):
         return "Product", self.product_id
 
     def get_translated_keys(self):
-        translated_keys = super().get_translated_keys()
-        translated_keys.update(
-            {
-                "name": self.name,
-                "description": self.description,
-            }
-        )
-        return translated_keys
+        return {
+            **super().get_translated_keys(),
+            "name": self.name,
+            "description": self.description,
+        }
 
 
 class ProductChannelListing(PublishableModel):
     product = models.ForeignKey(
         Product,
-        null=False,
-        blank=False,
         related_name="channel_listings",
         on_delete=models.CASCADE,
     )
     channel = models.ForeignKey(
         Channel,
-        null=False,
-        blank=False,
         related_name="product_listings",
         on_delete=models.CASCADE,
     )
-    visible_in_listings = models.BooleanField(default=False)
-    available_for_purchase_at = models.DateTimeField(blank=True, null=True)
     currency = models.CharField(max_length=settings.DEFAULT_CURRENCY_CODE_LENGTH)
+    price_amount = models.DecimalField(
+        max_digits=settings.DEFAULT_MAX_DIGITS,
+        decimal_places=settings.DEFAULT_DECIMAL_PLACES,
+        blank=True,
+        null=True,
+    )
+    price = MoneyField(amount_field="price_amount", currency_field="currency")
     discounted_price_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
@@ -315,6 +269,8 @@ class ProductChannelListing(PublishableModel):
     discounted_price = MoneyField(
         amount_field="discounted_price_amount", currency_field="currency"
     )
+    visible_in_listings = models.BooleanField(default=False)
+    available_for_purchase_at = models.DateTimeField(blank=True, null=True)
     discounted_price_dirty = models.BooleanField(default=False)
 
     class Meta:
@@ -333,13 +289,16 @@ class ProductChannelListing(PublishableModel):
 
 
 class ProductVariant(SortableModel, ModelWithMetadata, ModelWithExternalReference):
-    sku = models.CharField(max_length=255, unique=True, null=True, blank=True)
-    name = models.CharField(max_length=255, blank=True)
     product = models.ForeignKey(
         Product, related_name="variants", on_delete=models.CASCADE
     )
-    media = models.ManyToManyField(
-        "product.ProductMedia", through="product.VariantMedia"
+    sku = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    name = models.CharField(max_length=255, blank=True)
+    weight = MeasurementField(
+        measurement=Weight,
+        unit_choices=WeightUnits.CHOICES,
+        blank=True,
+        null=True,
     )
     track_inventory = models.BooleanField(default=True)
     is_preorder = models.BooleanField(default=False)
@@ -348,15 +307,9 @@ class ProductVariant(SortableModel, ModelWithMetadata, ModelWithExternalReferenc
     quantity_limit_per_customer = models.IntegerField(
         blank=True, null=True, validators=[MinValueValidator(1)]
     )
+    media = models.ManyToManyField("ProductMedia", through="VariantMedia")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True, db_index=True)
-
-    weight = MeasurementField(
-        measurement=Weight,
-        unit_choices=WeightUnits.CHOICES,
-        blank=True,
-        null=True,
-    )
 
     objects = managers.ProductVariantManager()
 
@@ -370,34 +323,19 @@ class ProductVariant(SortableModel, ModelWithMetadata, ModelWithExternalReferenc
     def get_global_id(self):
         return graphene.Node.to_global_id("ProductVariant", self.id)
 
-    def get_base_price(
-        self,
-        channel_listing: "ProductVariantChannelListing",
-        price_override: Optional["Decimal"] = None,
-    ) -> "Money":
-        """Return the base variant price before applying the promotion discounts."""
+    def get_base_price(self, channel_listing, price_override=None):
         return (
             channel_listing.price
             if price_override is None
             else Money(price_override, channel_listing.currency)
         )
 
-    def get_price(
-        self,
-        channel_listing: "ProductVariantChannelListing",
-        price_override: Optional["Decimal"] = None,
-        promotion_rules: Optional[Iterable["PromotionRule"]] = None,
-    ) -> "Money":
-        """Return the variant discounted price with applied promotions.
-
-        If a custom price is provided, return the price with applied discounts from
-        valid promotion rules for this variant.
-        """
+    def get_price(self, channel_listing, price_override=None, promotion_rules=None):
         from discount.utils.promotion import calculate_discounted_price_for_rules
 
         if price_override is None:
             return channel_listing.discounted_price or channel_listing.price
-        price: Money = self.get_base_price(channel_listing, price_override)
+        price = self.get_base_price(channel_listing, price_override)
         rules = promotion_rules or []
         return calculate_discounted_price_for_rules(
             price=price, rules=rules, currency=channel_listing.currency
@@ -413,20 +351,16 @@ class ProductVariant(SortableModel, ModelWithMetadata, ModelWithExternalReferenc
         return self.product.product_type.kind == ProductTypeKind.GIFT_CARD
 
     def is_digital(self) -> bool:
-        is_digital = self.product.product_type.is_digital
-        return not self.is_shipping_required() and is_digital
+        return not self.is_shipping_required() and self.product.product_type.is_digital
 
-    def display_product(self, translated: bool = False) -> str:
+    def display_product(self, translated=False) -> str:
         if translated:
             product = get_translation(self.product).name
             variant_display = get_translation(self).name
         else:
             variant_display = str(self)
             product = self.product
-        product_display = (
-            f"{product} ({variant_display})" if variant_display else str(product)
-        )
-        return product_display
+        return f"{product} ({variant_display})" if variant_display else str(product)
 
     def get_ordering_queryset(self):
         return self.product.variants.all()
@@ -446,10 +380,6 @@ class ProductVariantTranslation(Translation):
     class Meta:
         unique_together = (("language_code", "product_variant"),)
 
-    def __repr__(self):
-        class_ = type(self)
-        return f"{class_.__name__}(pk={self.pk!r}, name={self.name!r}, variant_pk={self.product_variant_id!r})"
-
     def __str__(self):
         return self.name or str(self.product_variant)
 
@@ -463,15 +393,11 @@ class ProductVariantTranslation(Translation):
 class ProductVariantChannelListing(models.Model):
     variant = models.ForeignKey(
         ProductVariant,
-        null=False,
-        blank=False,
         related_name="channel_listings",
         on_delete=models.CASCADE,
     )
     channel = models.ForeignKey(
         Channel,
-        null=False,
-        blank=False,
         related_name="variant_listings",
         on_delete=models.CASCADE,
     )
@@ -483,7 +409,6 @@ class ProductVariantChannelListing(models.Model):
         null=True,
     )
     price = MoneyField(amount_field="price_amount", currency_field="currency")
-
     cost_price_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
@@ -491,7 +416,6 @@ class ProductVariantChannelListing(models.Model):
         null=True,
     )
     cost_price = MoneyField(amount_field="cost_price_amount", currency_field="currency")
-
     discounted_price_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
@@ -501,14 +425,12 @@ class ProductVariantChannelListing(models.Model):
     discounted_price = MoneyField(
         amount_field="discounted_price_amount", currency_field="currency"
     )
+    preorder_quantity_threshold = models.IntegerField(blank=True, null=True)
     promotion_rules = models.ManyToManyField(
         PromotionRule,
-        help_text=("Promotion rules that were included in the discounted price."),
-        through="product.VariantChannelListingPromotionRule",
+        through="VariantChannelListingPromotionRule",
         blank=True,
     )
-
-    preorder_quantity_threshold = models.IntegerField(blank=True, null=True)
 
     objects = managers.ProductVariantChannelListingManager()
 
@@ -516,9 +438,7 @@ class ProductVariantChannelListing(models.Model):
         unique_together = [["variant", "channel"]]
         ordering = ("pk",)
         indexes = [
-            BTreeIndex(
-                fields=["price_amount", "channel"], name="product_price_btree_idx"
-            ),
+            BTreeIndex(fields=["price_amount", "channel"], name="product_price_btree_idx"),
         ]
 
 
@@ -533,15 +453,13 @@ class VariantChannelListingPromotionRule(models.Model):
         related_name="variantlistingpromotionrule",
         on_delete=models.CASCADE,
     )
+    currency = models.CharField(max_length=settings.DEFAULT_CURRENCY_CODE_LENGTH)
     discount_amount = models.DecimalField(
         max_digits=settings.DEFAULT_MAX_DIGITS,
         decimal_places=settings.DEFAULT_DECIMAL_PLACES,
         default=Decimal("0.0"),
     )
     discount = MoneyField(amount_field="discount_amount", currency_field="currency")
-    currency = models.CharField(
-        max_length=settings.DEFAULT_CURRENCY_CODE_LENGTH,
-    )
 
     class Meta:
         unique_together = [["variant_channel_listing", "promotion_rule"]]
@@ -550,27 +468,25 @@ class VariantChannelListingPromotionRule(models.Model):
 class DigitalContent(ModelWithMetadata):
     FILE = "file"
     TYPE_CHOICES = ((FILE, "digital_product"),)
-    use_default_settings = models.BooleanField(default=True)
-    automatic_fulfillment = models.BooleanField(default=False)
-    content_type = models.CharField(max_length=128, default=FILE, choices=TYPE_CHOICES)
+
     product_variant = models.OneToOneField(
         ProductVariant, related_name="digital_content", on_delete=models.CASCADE
     )
+    use_default_settings = models.BooleanField(default=True)
+    automatic_fulfillment = models.BooleanField(default=False)
+    content_type = models.CharField(max_length=128, default=FILE, choices=TYPE_CHOICES)
     content_file = models.FileField(upload_to="digital_contents", blank=True)
     max_downloads = models.IntegerField(blank=True, null=True)
     url_valid_days = models.IntegerField(blank=True, null=True)
 
-    def create_new_url(self) -> "DigitalContentUrl":
+    def create_new_url(self):
         return self.urls.create()
 
 
 class DigitalContentUrl(models.Model):
-    token = models.UUIDField(editable=False, unique=True)
     content = models.ForeignKey(
         DigitalContent, related_name="urls", on_delete=models.CASCADE
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    download_num = models.IntegerField(default=0)
     line = models.OneToOneField(
         "order.OrderLine",
         related_name="digital_content_url",
@@ -578,15 +494,16 @@ class DigitalContentUrl(models.Model):
         null=True,
         on_delete=models.CASCADE,
     )
+    token = models.UUIDField(editable=False, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    download_num = models.IntegerField(default=0)
 
-    def save(
-        self, force_insert=False, force_update=False, using=None, update_fields=None
-    ):
+    def save(self, *args, **kwargs):
         if not self.token:
             self.token = str(uuid4()).replace("-", "")
-        super().save(force_insert, force_update, using, update_fields)
+        super().save(*args, **kwargs)
 
-    def get_absolute_url(self) -> Optional[str]:
+    def get_absolute_url(self):
         url = reverse("digital-product", kwargs={"token": str(self.token)})
         return build_absolute_uri(url)
 
@@ -615,9 +532,7 @@ class ProductMedia(SortableModel, ModelWithMetadata):
         app_label = "product"
 
     def get_ordering_queryset(self):
-        if not self.product:
-            return ProductMedia.objects.none()
-        return self.product.media.all()
+        return self.product.media.all() if self.product else ProductMedia.objects.none()
 
     @transaction.atomic
     def delete(self, *args, **kwargs):
@@ -626,7 +541,7 @@ class ProductMedia(SortableModel, ModelWithMetadata):
 
 class VariantMedia(models.Model):
     variant = models.ForeignKey(
-        "ProductVariant", related_name="variant_media", on_delete=models.CASCADE
+        ProductVariant, related_name="variant_media", on_delete=models.CASCADE
     )
     media = models.ForeignKey(
         ProductMedia, related_name="variant_media", on_delete=models.CASCADE
@@ -638,7 +553,7 @@ class VariantMedia(models.Model):
 
 class CollectionProduct(SortableModel):
     collection = models.ForeignKey(
-        "Collection", related_name="collectionproduct", on_delete=models.CASCADE
+        Collection, related_name="collectionproduct", on_delete=models.CASCADE
     )
     product = models.ForeignKey(
         Product, related_name="collectionproduct", on_delete=models.CASCADE
@@ -654,19 +569,17 @@ class CollectionProduct(SortableModel):
 class Collection(SeoModel, ModelWithMetadata):
     name = models.CharField(max_length=250)
     slug = models.SlugField(max_length=255, unique=True, allow_unicode=True)
+    description = models.JSONField(blank=True, null=True, default=clean_editor_js)
+    background_image = models.ImageField(
+        upload_to="collection-backgrounds", blank=True, null=True
+    )
+    background_image_alt = models.CharField(max_length=128, blank=True)
     products = models.ManyToManyField(
         Product,
         blank=True,
         related_name="collections",
         through=CollectionProduct,
-        through_fields=("collection", "product"),
     )
-    background_image = models.ImageField(
-        upload_to="collection-backgrounds", blank=True, null=True
-    )
-    background_image_alt = models.CharField(max_length=128, blank=True)
-
-    description = models.JSONField(blank=True, null=True, default=clean_editor_js)
 
     objects = managers.CollectionManager()
 
@@ -675,8 +588,8 @@ class Collection(SeoModel, ModelWithMetadata):
         indexes = [
             *ModelWithMetadata.Meta.indexes,
             GinIndex(
-                name="collection_search_gin",
                 fields=["name", "slug"],
+                name="collection_search_gin",
                 opclasses=["gin_trgm_ops"] * 2,
             ),
         ]
@@ -688,15 +601,11 @@ class Collection(SeoModel, ModelWithMetadata):
 class CollectionChannelListing(PublishableModel):
     collection = models.ForeignKey(
         Collection,
-        null=False,
-        blank=False,
         related_name="channel_listings",
         on_delete=models.CASCADE,
     )
     channel = models.ForeignKey(
         Channel,
-        null=False,
-        blank=False,
         related_name="collection_listings",
         on_delete=models.CASCADE,
     )
@@ -722,22 +631,15 @@ class CollectionTranslation(SeoModelTranslationWithSlug):
         ]
         unique_together = (("language_code", "collection"),)
 
-    def __repr__(self):
-        class_ = type(self)
-        return f"{class_.__name__}(pk={self.pk!r}, name={self.name!r}, collection_pk={self.collection_id!r})"
-
     def __str__(self) -> str:
-        return self.name if self.name else str(self.pk)
+        return self.name or str(self.pk)
 
     def get_translated_object_id(self):
         return "Collection", self.collection_id
 
     def get_translated_keys(self):
-        translated_keys = super().get_translated_keys()
-        translated_keys.update(
-            {
-                "name": self.name,
-                "description": self.description,
-            }
-        )
-        return translated_keys
+        return {
+            **super().get_translated_keys(),
+            "name": self.name,
+            "description": self.description,
+        }
