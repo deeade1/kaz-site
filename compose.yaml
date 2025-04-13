@@ -5,7 +5,7 @@ services:
     ports:
       - "5433:5432"
     env_file:
-      - ./.env.prod.db
+      - ./.env.db
     volumes:
       - kaz-db-data:/var/lib/postgresql/data
     restart: always
@@ -30,7 +30,6 @@ services:
     volumes:
       - ./media:/home/apps/backend/media
       - ./static:/home/apps/backend/static
-      - ./apps/backend:/home/apps/backend
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health/"]
@@ -64,4 +63,3 @@ volumes:
   kaz-db-data:
   media:
   static:
-  backend:

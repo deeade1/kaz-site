@@ -34,7 +34,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-package-lock.json
+!package-lock.json
 downloads/
 eggs/
 .eggs/
@@ -88,9 +88,17 @@ __pypackages__/
 celerybeat-schedule
 celerybeat.pid
 *.sage.py
-.env
+# Ignore all env files by default
+*.env*
+
+# But allow production env files
+!.env
+!.env.db
+!.env.prod
+!.env.prod.db
+
+#!.env.prod.nginx
 .venv
-env/
 venv/
 ENV/
 env.bak/
