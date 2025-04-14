@@ -19,7 +19,7 @@ services:
     container_name: kaz-backend
     build:
       context: .  # The root of the project directory
-      dockerfile: apps/docker/backend/Dockerfile
+      dockerfile: apps/backend/Dockerfile
     depends_on:
       kaz-db:
         condition: service_healthy
@@ -41,13 +41,13 @@ services:
     container_name: kaz-nginx
     build:
       context: .  # The root of the project directory
-      dockerfile: apps/docker/frontend/Dockerfile
+      dockerfile: apps/frontend/Dockerfile
     ports:
       - "8081:80"  # External port 8081 to container's 80
     volumes:
       - ./media:/home/apps/backend/media
       - ./static:/home/apps/backend/static
-      - ./apps/docker/nginx/:/etc/nginx/conf.d
+      - ./apps/nginx/:/etc/nginx/conf.d
       - ./apps/frontend/dist:/usr/share/nginx/html
     restart: unless-stopped
     depends_on:
