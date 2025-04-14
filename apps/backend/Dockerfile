@@ -20,7 +20,6 @@ WORKDIR $APP_HOME
 FROM base as builder
 
 # Install system dependencies
-
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         gcc \
@@ -38,18 +37,22 @@ RUN apt-get update && \
         libgtk-3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-
-
 # Upgrade pip and configure pip settings
 RUN pip install --no-cache-dir --upgrade pip && \
     pip config set global.timeout ${PIP_TIMEOUT} && \
     pip config set global.retries ${PIP_RETRIES} && \
     pip config set global.index-url ${PIP_INDEX_URL}
 
+# Manually build and install dlib (Python 3.12 workaround)
+RUN git clone -b v19.24 --depth 1 https://github.com/davisking/dlib.git /tmp/dlib && \
+    cd /tmp/dlib && \
+    python3 setup.py install && \
+    rm -rf /tmp/dlib
+
 # Copy requirements in stages
 COPY apps/backend/requirements.txt .
 
-# Install remaining requirements
+# Install remaining requirements (excluding dlib)
 RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels -r requirements.txt
 
 # ------------------------- #
