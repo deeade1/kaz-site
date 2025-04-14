@@ -20,14 +20,25 @@ WORKDIR $APP_HOME
 FROM base as builder
 
 # Install system dependencies
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         gcc \
+        g++ \
+        cmake \
+        make \
         python3-dev \
         libpq-dev \
         libgeos-dev \
-        libproj-dev && \
+        libproj-dev \
+        libboost-all-dev \
+        libopenblas-dev \
+        liblapack-dev \
+        libx11-dev \
+        libgtk-3-dev && \
     rm -rf /var/lib/apt/lists/*
+
+
 
 # Upgrade pip and configure pip settings
 RUN pip install --no-cache-dir --upgrade pip && \
