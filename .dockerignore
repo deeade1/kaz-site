@@ -92,7 +92,7 @@ celerybeat.pid
 *.env*
 
 # But allow production env files
-!.env
+!.env.dev
 !.env.db
 !.env.prod
 !.env.prod.db
