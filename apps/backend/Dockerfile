@@ -11,7 +11,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_RETRIES=10 \
     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
-# Set working directory
 WORKDIR $APP_HOME
 
 # ------------------------- #
@@ -19,12 +18,13 @@ WORKDIR $APP_HOME
 # ------------------------- #
 FROM base as builder
 
-# Install system dependencies
+# Install system build dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        git \
+        cmake \
         gcc \
         g++ \
-        cmake \
         make \
         python3-dev \
         libpq-dev \
@@ -37,27 +37,24 @@ RUN apt-get update && \
         libgtk-3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and configure pip settings
+# Upgrade pip and set pip configs
 RUN pip install --no-cache-dir --upgrade pip && \
     pip config set global.timeout ${PIP_TIMEOUT} && \
     pip config set global.retries ${PIP_RETRIES} && \
     pip config set global.index-url ${PIP_INDEX_URL}
 
-# Manually build and install dlib (Python 3.12 workaround)
+# Copy and install base dependencies without face-recognition
+COPY apps/backend/requirements.txt .
+RUN grep -v "face-recognition" requirements.txt > requirements-clean.txt && \
+    pip install --no-cache-dir -r requirements-clean.txt
+
+# Install dlib manually from source
 RUN git clone -b v19.24 --depth 1 https://github.com/davisking/dlib.git /tmp/dlib && \
     cd /tmp/dlib && \
     python3 setup.py install && \
     rm -rf /tmp/dlib
 
-# Copy requirements.txt and install wheels (excluding face-recognition)
-COPY apps/backend/requirements.txt .
-
-# Temporarily remove face-recognition for the wheel build
-RUN grep -v "face-recognition" requirements.txt > requirements-clean.txt
-
-RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels -r requirements-clean.txt
-
-# Manually install face-recognition now that dlib is ready
+# Now install face-recognition (requires dlib)
 RUN pip install --no-cache-dir face-recognition
 
 # ------------------------- #
@@ -65,7 +62,7 @@ RUN pip install --no-cache-dir face-recognition
 # ------------------------- #
 FROM base
 
-# Install runtime dependencies - using correct package names for Bookworm
+# Install runtime dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         netcat-traditional \
@@ -77,17 +74,11 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy wheels from builder and install
-COPY --from=builder /wheels /wheels
-COPY --from=builder $APP_HOME/requirements.txt .
-RUN pip install --no-cache-dir /wheels/* && \
-    rm -rf /wheels
-
-# Also copy the manually installed face-recognition package from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+# Copy installed Python packages from builder stage
+COPY --from=builder /usr/local/lib/python3.12 /usr/local/lib/python3.12
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Create necessary directories and set ownership
+# Create necessary directories and app user
 RUN mkdir -p $APP_HOME/static $APP_HOME/media && \
     addgroup --gid 1001 --system app && \
     adduser --uid 1001 --system --ingroup app --no-create-home --shell /bin/false app && \
