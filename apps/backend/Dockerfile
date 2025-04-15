@@ -49,11 +49,16 @@ RUN git clone -b v19.24 --depth 1 https://github.com/davisking/dlib.git /tmp/dli
     python3 setup.py install && \
     rm -rf /tmp/dlib
 
-# Copy requirements in stages
+# Copy requirements.txt and install wheels (excluding face-recognition)
 COPY apps/backend/requirements.txt .
 
-# Install remaining requirements (excluding dlib)
-RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels -r requirements.txt
+# Temporarily remove face-recognition for the wheel build
+RUN grep -v "face-recognition" requirements.txt > requirements-clean.txt
+
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels -r requirements-clean.txt
+
+# Manually install face-recognition now that dlib is ready
+RUN pip install --no-cache-dir face-recognition
 
 # ------------------------- #
 # Final Stage
@@ -77,6 +82,10 @@ COPY --from=builder /wheels /wheels
 COPY --from=builder $APP_HOME/requirements.txt .
 RUN pip install --no-cache-dir /wheels/* && \
     rm -rf /wheels
+
+# Also copy the manually installed face-recognition package from builder
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Create necessary directories and set ownership
 RUN mkdir -p $APP_HOME/static $APP_HOME/media && \
